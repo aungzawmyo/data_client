@@ -1,0 +1,19 @@
+appId: com.aos.data-client
+productName: Data Client
+copyright: Copyright © 2026 AOS
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+win:
+  target:
+    - nsis
+  artifactName: ${productName}-${version}-setup.${ext}
+  signAndEditExecutable: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Data Client
+npmRebuild: false

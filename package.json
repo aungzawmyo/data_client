@@ -1,0 +1,44 @@
+{
+  "name": "data-client",
+  "version": "0.1.0-beta.1",
+  "description": "Windows PostgreSQL database management client with visual editors",
+  "main": "./out/main/index.js",
+  "author": "AOS",
+  "license": "MIT",
+  "homepage": "https://github.com/aungzawmyo/data_client",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "npm run build && electron-builder --win nsis",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web"
+  },
+  "dependencies": {
+    "@codemirror/lang-sql": "^6.8.0",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "@electron-toolkit/utils": "^3.0.0",
+    "@uiw/react-codemirror": "^4.23.10",
+    "lucide-react": "^0.468.0",
+    "pg": "^8.13.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-resizable-panels": "^2.1.7",
+    "ssh2": "^1.17.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^18.3.14",
+    "@types/react-dom": "^18.3.5",
+    "@types/ssh2": "^1.15.6",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}
