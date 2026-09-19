@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron'
 import { Pool, types, type PoolClient } from 'pg'
 import type {
+  CatalogSchema,
   ColumnInfo,
   ConnectionConfig,
   DatabaseInfo,
@@ -8,6 +9,8 @@ import type {
   IndexInfo,
   QueryHistoryEntry,
   QueryResult,
+  RoleGrant,
+  RoleInfo,
   SchemaInfo,
   SchemaObjectInfo,
   SslMode,
@@ -63,6 +66,8 @@ export class PostgresManager {
   private tunnels = new Map<string, SshTunnel>()
   private running = new Map<string, { pid: number; client: PoolClient }>()
   private cancelReason = new Map<string, 'user' | 'timeout'>()
+  private txClients = new Map<string, PoolClient>()
+  private endpoints = new Map<string, { host: string; port: number }>()
 
   async test(config: ConnectionConfig): Promise<string> {
     const resolved = await this.resolveTarget(config)
@@ -80,6 +85,7 @@ export class PostgresManager {
     await this.disconnect(config.id)
     const resolved = await this.resolveTarget(config)
     if (resolved.close) this.tunnels.set(config.id, { port: resolved.port, close: resolved.close })
+    this.endpoints.set(config.id, { host: resolved.host, port: resolved.port })
     const pool = this.createPool(config, resolved.host, resolved.port)
     const client = await pool.connect()
     try {
@@ -97,8 +103,10 @@ export class PostgresManager {
   }
 
   async disconnect(id: string): Promise<void> {
+    await this.rollback(id).catch(() => undefined)
     this.running.delete(id)
     this.cancelReason.delete(id)
+    this.endpoints.delete(id)
     const pool = this.pools.get(id)
     if (pool) {
       this.pools.delete(id)
@@ -125,9 +133,8 @@ export class PostgresManager {
     silent = false,
     timeoutMs = 0
   ): Promise<QueryResult[]> {
-    const pool = this.requirePool(id)
     const started = Date.now()
-    const client = await pool.connect()
+    const { client, release } = await this.acquireClient(id)
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const pidResult = await client.query('select pg_backend_pid() as pid')
@@ -203,8 +210,54 @@ export class PostgresManager {
       if (timer) clearTimeout(timer)
       this.running.delete(id)
       this.cancelReason.delete(id)
+      release()
+    }
+  }
+
+  async begin(id: string): Promise<void> {
+    if (this.txClients.has(id)) throw new Error('A transaction is already open')
+    const pool = this.requirePool(id)
+    const client = await pool.connect()
+    try {
+      await client.query('begin')
+      this.txClients.set(id, client)
+    } catch (error) {
+      client.release()
+      throw error
+    }
+  }
+
+  async commit(id: string): Promise<void> {
+    const client = this.txClients.get(id)
+    if (!client) throw new Error('No open transaction')
+    try {
+      await client.query('commit')
+    } finally {
+      this.txClients.delete(id)
       client.release()
     }
+  }
+
+  async rollback(id: string): Promise<void> {
+    const client = this.txClients.get(id)
+    if (!client) return
+    try {
+      await client.query('rollback')
+    } finally {
+      this.txClients.delete(id)
+      client.release()
+    }
+  }
+
+  txOpen(id: string): boolean {
+    return this.txClients.has(id)
+  }
+
+  endpoint(id: string): { host: string; port: number; config: ConnectionConfig } {
+    const config = this.configs.get(id)
+    if (!config) throw new Error('Not connected')
+    const resolved = this.endpoints.get(id) ?? { host: config.host, port: config.port }
+    return { ...resolved, config }
   }
 
   async cancel(id: string): Promise<void> {
@@ -776,6 +829,156 @@ export class PostgresManager {
       inserted += batch.length
     }
     return inserted
+  }
+
+  async listRoles(id: string): Promise<RoleInfo[]> {
+    const result = await this.query(
+      id,
+      `select r.rolname as name,
+              r.rolsuper as superuser,
+              r.rolinherit as inherit,
+              r.rolcreaterole as "createRole",
+              r.rolcreatedb as "createDb",
+              r.rolcanlogin as "canLogin",
+              r.rolreplication as replication,
+              r.rolbypassrls as "bypassRls",
+              r.rolconnlimit as "connectionLimit",
+              r.rolvaliduntil as "validUntil",
+              coalesce((
+                select array_agg(m.rolname order by m.rolname)
+                  from pg_auth_members am
+                  join pg_roles m on m.oid = am.roleid
+                 where am.member = r.oid
+              ), '{}') as "memberOf"
+         from pg_roles r
+        order by r.rolname`,
+      [],
+      true
+    )
+    return result[0].rows.map((row) => ({
+      name: String(row.name),
+      superuser: Boolean(row.superuser),
+      inherit: Boolean(row.inherit),
+      createRole: Boolean(row.createRole),
+      createDb: Boolean(row.createDb),
+      canLogin: Boolean(row.canLogin),
+      replication: Boolean(row.replication),
+      bypassRls: Boolean(row.bypassRls),
+      connectionLimit: Number(row.connectionLimit ?? -1),
+      validUntil: row.validUntil == null ? null : String(row.validUntil),
+      memberOf: Array.isArray(row.memberOf) ? (row.memberOf as string[]) : []
+    }))
+  }
+
+  async listRoleGrants(id: string, role: string): Promise<RoleGrant[]> {
+    const result = await this.query(
+      id,
+      `select grantee, 'database' as kind, current_database() as target, privilege_type as privilege
+         from information_schema.role_table_grants
+        where false
+        union all
+       select grantee, 'table' as kind, table_schema || '.' || table_name as target, privilege_type as privilege
+         from information_schema.role_table_grants
+        where grantee = $1
+        union all
+       select grantee, 'schema' as kind, object_schema as target, privilege_type as privilege
+         from information_schema.usage_privileges
+        where grantee = $1
+          and object_type = 'SCHEMA'
+        order by kind, target, privilege`,
+      [role],
+      true
+    )
+    const db = await this.query(
+      id,
+      `select $1 as grantee,
+              'database' as kind,
+              d.datname as target,
+              p.privilege as privilege
+         from pg_database d
+         join lateral (
+           select unnest(array['CONNECT','CREATE','TEMP']) as privilege
+         ) p on has_database_privilege($1, d.datname, p.privilege)
+        where d.datname = current_database()`,
+      [role],
+      true
+    )
+    return [...db[0].rows, ...result[0].rows].map((row) => ({
+      grantee: String(row.grantee ?? role),
+      target: String(row.target),
+      privilege: String(row.privilege),
+      kind: row.kind === 'schema' ? 'schema' : row.kind === 'database' ? 'database' : 'table'
+    }))
+  }
+
+  async catalogSchema(id: string): Promise<CatalogSchema> {
+    const [schemas, tables, columns, functions] = await Promise.all([
+      this.query(
+        id,
+        `select nspname as name
+           from pg_namespace
+          where nspname not like 'pg\\_%' escape '\\'
+            and nspname <> 'information_schema'
+          order by nspname`,
+        [],
+        true
+      ),
+      this.query(
+        id,
+        `select n.nspname as schema, c.relname as name
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname not like 'pg\\_%' escape '\\'
+            and n.nspname <> 'information_schema'
+            and c.relkind in ('r', 'p', 'v', 'm')
+          order by n.nspname, c.relname`,
+        [],
+        true
+      ),
+      this.query(
+        id,
+        `select n.nspname as schema, c.relname as table, a.attname as name
+           from pg_attribute a
+           join pg_class c on c.oid = a.attrelid
+           join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname not like 'pg\\_%' escape '\\'
+            and n.nspname <> 'information_schema'
+            and c.relkind in ('r', 'p', 'v', 'm')
+            and a.attnum > 0
+            and not a.attisdropped
+          order by n.nspname, c.relname, a.attnum`,
+        [],
+        true
+      ),
+      this.query(
+        id,
+        `select n.nspname as schema, p.proname as name
+           from pg_proc p
+           join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname not like 'pg\\_%' escape '\\'
+            and n.nspname <> 'information_schema'
+          order by n.nspname, p.proname`,
+        [],
+        true
+      )
+    ])
+    return {
+      schemas: schemas[0].rows.map((row) => String(row.name)),
+      tables: tables[0].rows.map((row) => ({ schema: String(row.schema), name: String(row.name) })),
+      columns: columns[0].rows.map((row) => ({
+        schema: String(row.schema),
+        table: String(row.table),
+        name: String(row.name)
+      })),
+      functions: functions[0].rows.map((row) => ({ schema: String(row.schema), name: String(row.name) }))
+    }
+  }
+
+  private async acquireClient(id: string): Promise<{ client: PoolClient; release: () => void }> {
+    const existing = this.txClients.get(id)
+    if (existing) return { client: existing, release: () => undefined }
+    const client = await this.requirePool(id).connect()
+    return { client, release: () => client.release() }
   }
 
   private requirePool(id: string): Pool {

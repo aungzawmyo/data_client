@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Circle, Columns3, Download, GripVertical, LayoutGrid, Maximize2, Rows3, Square, ZoomIn, ZoomOut } from 'lucide-react'
-import type { ColumnInfo, ForeignKeyInfo, TableInfo } from '@shared/types'
+import type { ColumnInfo, ForeignKeyInfo, SchemaLayoutState, TableInfo } from '@shared/types'
 import { autoLayout, type LayoutMode } from '../lib/schemaLayout'
 import { onAppCommand } from '../lib/commands'
 import { useAppStore } from '../store'
 import { downloadBlob, downloadText } from '../lib/exportGrid'
+import { readLocalLayout, writeLocalLayout } from '../lib/snippets'
 
 const CARD_W = 248
 const SNAP = 16
@@ -23,15 +24,25 @@ type NodeModel = {
   foreignKeys: ForeignKeyInfo[]
 }
 
-type LayoutState = {
-  positions: Record<string, Pos>
-  hidden: string[]
-  pan: Pos
-  zoom: number
+type LayoutState = SchemaLayoutState
+
+function layoutKeys(connectionId: string, database: string, schema: string): string[] {
+  const primary = `${connectionId}:${database}:${schema}`
+  const legacy = `${connectionId}:${schema}`
+  return primary === legacy ? [primary] : [primary, legacy]
 }
 
-function layoutKey(connectionId: string, schema: string): string {
-  return `data-client:schema-layout:${connectionId}:${schema}`
+async function readSavedLayout(
+  connectionId: string,
+  database: string,
+  schema: string
+): Promise<LayoutState | null> {
+  const keys = layoutKeys(connectionId, database, schema)
+  for (const key of keys) {
+    const fromPrefs = await window.api.prefs?.getSchemaLayout(key)
+    if (fromPrefs?.positions && Object.keys(fromPrefs.positions).length) return fromPrefs
+  }
+  return readLocalLayout(keys)
 }
 
 function snap(value: number): number {
@@ -47,7 +58,9 @@ function cardHeight(columnCount: number): number {
 }
 
 export function SchemaOverview({ schema }: { schema: string }) {
-  const { activeConnection, openTab, toggleExpand } = useAppStore()
+  const { activeConnection, currentDatabase, openTab } = useAppStore()
+  const connectionId = activeConnection?.id
+  const database = currentDatabase || activeConnection?.database || ''
   const viewportRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{
     kind: 'table' | 'pan'
@@ -75,23 +88,37 @@ export function SchemaOverview({ schema }: { schema: string }) {
   const panRef = useRef(pan)
   const zoomRef = useRef(zoom)
   const hiddenRef = useRef(hidden)
+  const layoutModeRef = useRef(layoutMode)
+  const customRowsRef = useRef(customRows)
+  const customColsRef = useRef(customCols)
+  const dirtyRef = useRef(false)
+  const moveDragRef = useRef<(pointerId: number, clientX: number, clientY: number) => void>(() => undefined)
+  const finishDragRef = useRef<(pointerId: number) => void>(() => undefined)
   positionsRef.current = positions
   panRef.current = pan
   zoomRef.current = zoom
   hiddenRef.current = hidden
+  layoutModeRef.current = layoutMode
+  customRowsRef.current = customRows
+  customColsRef.current = customCols
 
   const persist = useCallback(
     (next: Partial<Omit<LayoutState, 'hidden'>> & { hidden?: string[] | Set<string> } = {}) => {
-      if (!activeConnection) return
+      if (!connectionId) return
       const payload: LayoutState = {
         positions: next.positions ?? positionsRef.current,
         hidden: next.hidden ? Array.from(next.hidden) : Array.from(hiddenRef.current),
         pan: next.pan ?? panRef.current,
-        zoom: next.zoom ?? zoomRef.current
+        zoom: next.zoom ?? zoomRef.current,
+        layoutMode: next.layoutMode ?? layoutModeRef.current,
+        customRows: next.customRows ?? customRowsRef.current,
+        customCols: next.customCols ?? customColsRef.current
       }
-      localStorage.setItem(layoutKey(activeConnection.id, schema), JSON.stringify(payload))
+      const keys = layoutKeys(connectionId, database, schema)
+      writeLocalLayout(keys, payload)
+      void window.api.prefs?.setSchemaLayout(keys[0], payload)
     },
-    [activeConnection, schema]
+    [connectionId, database, schema]
   )
 
   const applyZoom = useCallback(
@@ -122,16 +149,15 @@ export function SchemaOverview({ schema }: { schema: string }) {
   )
 
   useEffect(() => {
-    if (!activeConnection) return
+    if (!connectionId) return
     let cancelled = false
     void (async () => {
       try {
-        await toggleExpand(`schema:${schema}`)
-        const list = await window.api.pg.listTables(activeConnection.id, schema)
+        const list = await window.api.pg.listTables(connectionId, schema)
         const nextNodes: Record<string, NodeModel> = {}
         await Promise.all(
           list.map(async (table) => {
-            const details = await window.api.pg.tableDetails(activeConnection.id, schema, table.name)
+            const details = await window.api.pg.tableDetails(connectionId, schema, table.name)
             nextNodes[table.name] = {
               info: table,
               columns: details.columns,
@@ -140,21 +166,48 @@ export function SchemaOverview({ schema }: { schema: string }) {
           })
         )
         if (cancelled) return
-        const savedRaw = localStorage.getItem(layoutKey(activeConnection.id, schema))
-        const saved = savedRaw ? (JSON.parse(savedRaw) as LayoutState) : null
         setTables(list)
         setNodes(nextNodes)
-        setPositions(
-          saved?.positions && Object.keys(saved.positions).length
-            ? saved.positions
-            : autoLayout(list, nextNodes, {
-                mode: 'horizontal',
-                schema,
-                viewportWidth: 1600,
-                cardWidth: CARD_W,
-                heightOf: cardHeight
-              })
-        )
+        if (dirtyRef.current && Object.keys(positionsRef.current).length) {
+          const keep = positionsRef.current
+          const fallback = autoLayout(
+            list.filter((table) => !keep[table.name]),
+            nextNodes,
+            {
+              mode: 'horizontal',
+              schema,
+              viewportWidth: 1600,
+              cardWidth: CARD_W,
+              heightOf: cardHeight
+            }
+          )
+          const merged = { ...fallback, ...keep }
+          positionsRef.current = merged
+          setPositions(merged)
+          return
+        }
+        const saved = await readSavedLayout(connectionId, database, schema)
+        const mode = saved?.layoutMode ?? 'horizontal'
+        const rows = saved?.customRows ?? 3
+        const cols = saved?.customCols ?? 4
+        setLayoutMode(mode)
+        setCustomRows(rows)
+        setCustomCols(cols)
+        layoutModeRef.current = mode
+        customRowsRef.current = rows
+        customColsRef.current = cols
+        const fallback = autoLayout(list, nextNodes, {
+          mode: saved?.positions && Object.keys(saved.positions).length ? 'horizontal' : mode,
+          rows,
+          cols,
+          schema,
+          viewportWidth: 1600,
+          cardWidth: CARD_W,
+          heightOf: cardHeight
+        })
+        const nextPositions = { ...fallback, ...(saved?.positions ?? {}) }
+        positionsRef.current = nextPositions
+        setPositions(nextPositions)
         setHidden(new Set(saved?.hidden ?? []))
         setPan(saved?.pan ?? { x: 24, y: 24 })
         setZoom(saved?.zoom ?? 1)
@@ -165,7 +218,13 @@ export function SchemaOverview({ schema }: { schema: string }) {
     return () => {
       cancelled = true
     }
-  }, [activeConnection, schema, toggleExpand])
+  }, [connectionId, database, schema])
+
+  useEffect(() => {
+    return () => {
+      if (dirtyRef.current) persist()
+    }
+  }, [persist])
 
   useEffect(() => {
     if (!layoutMenu) return
@@ -253,20 +312,20 @@ export function SchemaOverview({ schema }: { schema: string }) {
     }
   }
 
-  const onPointerMove = (event: ReactPointerEvent) => {
+  const moveDrag = (pointerId: number, clientX: number, clientY: number) => {
     const drag = dragRef.current
-    if (!drag || drag.pointer !== event.pointerId) return
+    if (!drag || drag.pointer !== pointerId) return
     if (drag.kind === 'pan') {
       const next = {
-        x: drag.origin.x + (event.clientX - drag.start.x),
-        y: drag.origin.y + (event.clientY - drag.start.y)
+        x: drag.origin.x + (clientX - drag.start.x),
+        y: drag.origin.y + (clientY - drag.start.y)
       }
       panRef.current = next
       setPan(next)
       return
     }
     if (!drag.name) return
-    const point = worldToLocal(event.clientX, event.clientY)
+    const point = worldToLocal(clientX, clientY)
     const nextPos = {
       x: snap(point.x - drag.origin.x),
       y: snap(point.y - drag.origin.y)
@@ -276,13 +335,43 @@ export function SchemaOverview({ schema }: { schema: string }) {
     setPositions(next)
   }
 
-  const endDrag = (event: ReactPointerEvent) => {
+  const finishDrag = (pointerId: number) => {
     const drag = dragRef.current
-    if (!drag || drag.pointer !== event.pointerId) return
+    if (!drag || drag.pointer !== pointerId) return
     dragRef.current = null
     setDragging(undefined)
-    persist()
+    if (drag.kind === 'table') {
+      dirtyRef.current = true
+      layoutModeRef.current = 'custom'
+      setLayoutMode('custom')
+      persist({ positions: positionsRef.current, layoutMode: 'custom' })
+      return
+    }
+    persist({ pan: panRef.current })
   }
+  moveDragRef.current = moveDrag
+  finishDragRef.current = finishDrag
+
+  const onPointerMove = (event: ReactPointerEvent) => {
+    moveDrag(event.pointerId, event.clientX, event.clientY)
+  }
+
+  const endDrag = (event: ReactPointerEvent) => {
+    finishDrag(event.pointerId)
+  }
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => moveDragRef.current(event.pointerId, event.clientX, event.clientY)
+    const onUp = (event: PointerEvent) => finishDragRef.current(event.pointerId)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+  }, [])
 
   const startTableDrag = (name: string, event: ReactPointerEvent) => {
     event.stopPropagation()
@@ -325,7 +414,10 @@ export function SchemaOverview({ schema }: { schema: string }) {
     setHidden(nextHidden)
     setPositions(nextPositions)
     setSelected(name)
-    persist({ positions: nextPositions, hidden: nextHidden })
+    dirtyRef.current = true
+    layoutModeRef.current = 'custom'
+    setLayoutMode('custom')
+    persist({ positions: nextPositions, hidden: nextHidden, layoutMode: 'custom' })
   }
 
   const onDropOnCanvas = (event: DragEvent) => {
@@ -386,7 +478,7 @@ export function SchemaOverview({ schema }: { schema: string }) {
     const merged = { ...positionsRef.current, ...next }
     positionsRef.current = merged
     setPositions(merged)
-    persist({ positions: merged })
+    persist({ positions: merged, layoutMode: mode })
     setLayoutMode(mode)
     setLayoutMenu(false)
     requestAnimationFrame(() => fitToContent())
@@ -444,24 +536,38 @@ export function SchemaOverview({ schema }: { schema: string }) {
 
   const exportPng = () => {
     const svg = diagramSvg()
-    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
+    const match = svg.match(/width="([\d.]+)" height="([\d.]+)"/)
+    const sourceWidth = Math.max(1, Math.round(Number(match?.[1] ?? 1)))
+    const sourceHeight = Math.max(1, Math.round(Number(match?.[2] ?? 1)))
+    const maxSide = 8192
+    const scale = Math.min(1, maxSide / sourceWidth, maxSide / sourceHeight)
+    const width = Math.max(1, Math.round(sourceWidth * scale))
+    const height = Math.max(1, Math.round(sourceHeight * scale))
     const image = new Image()
     image.onload = () => {
       const canvas = document.createElement('canvas')
-      canvas.width = Math.max(1, image.width)
-      canvas.height = Math.max(1, image.height)
+      canvas.width = width
+      canvas.height = height
       const ctx = canvas.getContext('2d')
-      if (!ctx) return
+      if (!ctx) {
+        setError('Could not create PNG canvas')
+        return
+      }
       ctx.fillStyle = '#10141c'
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(image, 0, 0)
+      ctx.fillRect(0, 0, width, height)
+      ctx.drawImage(image, 0, 0, width, height)
       canvas.toBlob((png) => {
-        if (png) downloadBlob(`${schema}-diagram.png`, png)
-        URL.revokeObjectURL(url)
+        if (!png) {
+          setError('PNG export failed')
+          return
+        }
+        setError('')
+        downloadBlob(`${schema}-diagram.png`, png)
       }, 'image/png')
     }
-    image.src = url
+    image.onerror = () => setError('PNG export failed to render the diagram')
+    const markup = svg.replace(/^<\?xml[^>]*>\s*/i, '')
+    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`
   }
 
   useEffect(() => {
@@ -539,7 +645,12 @@ export function SchemaOverview({ schema }: { schema: string }) {
                       min={1}
                       max={30}
                       value={customRows}
-                      onChange={(event) => setCustomRows(Math.max(1, Number(event.target.value) || 1))}
+                      onChange={(event) => {
+                        const rows = Math.max(1, Number(event.target.value) || 1)
+                        customRowsRef.current = rows
+                        setCustomRows(rows)
+                        persist({ customRows: rows })
+                      }}
                     />
                   </label>
                   <label>
@@ -549,7 +660,12 @@ export function SchemaOverview({ schema }: { schema: string }) {
                       min={1}
                       max={30}
                       value={customCols}
-                      onChange={(event) => setCustomCols(Math.max(1, Number(event.target.value) || 1))}
+                      onChange={(event) => {
+                        const cols = Math.max(1, Number(event.target.value) || 1)
+                        customColsRef.current = cols
+                        setCustomCols(cols)
+                        persist({ customCols: cols })
+                      }}
                     />
                   </label>
                   <button className="btn-primary" onClick={() => arrange('custom')}>
@@ -698,6 +814,9 @@ export function SchemaOverview({ schema }: { schema: string }) {
                     zIndex: dragging === table.name ? 5 : selected === table.name ? 4 : 2
                   }}
                   onPointerDown={(event) => startTableDrag(table.name, event)}
+                  onPointerMove={onPointerMove}
+                  onPointerUp={endDrag}
+                  onPointerCancel={endDrag}
                   onDoubleClick={() =>
                     openTab({
                       type: table.type === 'view' ? 'view-design' : 'table-design',

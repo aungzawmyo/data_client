@@ -19,7 +19,11 @@ export interface ConnectionConfig {
   sshPassword?: string
   sshPrivateKey?: string
   sshPassphrase?: string
+  environment?: ConnectionEnvironment
+  safeMode?: boolean
 }
+
+export type ConnectionEnvironment = 'development' | 'staging' | 'production'
 
 export interface QueryColumn {
   name: string
@@ -188,6 +192,105 @@ export interface Snippet {
   name: string
   sql: string
   updatedAt: string
+}
+
+export type SchemaLayoutMode = 'horizontal' | 'vertical' | 'square' | 'custom' | 'radial'
+
+export interface SchemaLayoutState {
+  positions: Record<string, { x: number; y: number }>
+  hidden: string[]
+  pan: { x: number; y: number }
+  zoom: number
+  layoutMode?: SchemaLayoutMode
+  customRows?: number
+  customCols?: number
+}
+
+export interface AppearancePrefs {
+  sidebarVisible: boolean
+  historyVisible: boolean
+  statusBarVisible: boolean
+  theme: 'dark' | 'midnight' | 'light'
+  density: 'comfortable' | 'compact'
+}
+
+export interface AppPrefs {
+  appearance: AppearancePrefs
+  queryTimeoutMs: number
+  snippets: Snippet[]
+  schemaLayouts: Record<string, SchemaLayoutState>
+  queryHistoryByConnection: Record<string, QueryHistoryEntry[]>
+  migratedFromLocal: boolean
+}
+
+export interface RoleInfo {
+  name: string
+  superuser: boolean
+  inherit: boolean
+  createRole: boolean
+  createDb: boolean
+  canLogin: boolean
+  replication: boolean
+  bypassRls: boolean
+  connectionLimit: number
+  validUntil: string | null
+  memberOf: string[]
+}
+
+export interface RoleGrant {
+  grantee: string
+  target: string
+  privilege: string
+  kind: 'database' | 'schema' | 'table'
+}
+
+export interface CatalogSchema {
+  schemas: string[]
+  tables: { schema: string; name: string }[]
+  columns: { schema: string; table: string; name: string }[]
+  functions: { schema: string; name: string }[]
+}
+
+export interface ExplainNode {
+  nodeType: string
+  relation?: string
+  alias?: string
+  actualTime?: number
+  actualRows?: number
+  planRows?: number
+  totalCost?: number
+  startupCost?: number
+  children: ExplainNode[]
+}
+
+export interface ExplainPlan {
+  planningTime?: number
+  executionTime?: number
+  root: ExplainNode
+}
+
+export interface DumpResult {
+  ok: boolean
+  tool: string
+  file: string
+  message: string
+}
+
+export const DEFAULT_APPEARANCE: AppearancePrefs = {
+  sidebarVisible: true,
+  historyVisible: true,
+  statusBarVisible: true,
+  theme: 'dark',
+  density: 'comfortable'
+}
+
+export const DEFAULT_PREFS: AppPrefs = {
+  appearance: DEFAULT_APPEARANCE,
+  queryTimeoutMs: 0,
+  snippets: [],
+  schemaLayouts: {},
+  queryHistoryByConnection: {},
+  migratedFromLocal: false
 }
 
 export const SESSION_COLORS = ['#3b82f6', '#22c55e', '#eab308', '#f97316', '#ef4444', '#a855f7', '#14b8a6']

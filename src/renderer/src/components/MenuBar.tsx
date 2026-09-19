@@ -71,6 +71,17 @@ export function MenuBar() {
         <hr />
         <Item label="Disconnect" disabled={!connected} onClick={() => run(() => void disconnect())} />
         <hr />
+        <Item
+          label="Dump database…"
+          disabled={!connected}
+          onClick={() => needConnection(() => void useAppStore.getState().dumpDatabase())}
+        />
+        <Item
+          label="Restore…"
+          disabled={!connected}
+          onClick={() => needConnection(() => void useAppStore.getState().restoreDatabase())}
+        />
+        <hr />
         <Item label="About Data Client" onClick={() => run(() => setAboutDialog(true))} />
         <Item label="Exit" shortcut="Alt+F4" onClick={() => run(() => void window.api.window.close())} />
       </Menu>
@@ -155,6 +166,11 @@ export function MenuBar() {
               openTab({ type: 'schema-diff', title: 'Schema diff', schema, name: schemas[1]?.name ?? schema })
             )
           }
+        />
+        <Item
+          label="Roles and grants"
+          disabled={!connected}
+          onClick={() => needConnection(() => openTab({ type: 'roles', title: 'Roles', name: 'roles' }))}
         />
         <hr />
         <Item label="Auto layout · vertical" onClick={() => run(() => emitAppCommand('layout-vertical'))} />

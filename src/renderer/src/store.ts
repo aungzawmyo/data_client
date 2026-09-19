@@ -1,5 +1,8 @@
 import { create } from 'zustand'
 import type {
+  AppearancePrefs,
+  AppPrefs,
+  CatalogSchema,
   ConnectionConfig,
   DatabaseInfo,
   QueryHistoryEntry,
@@ -10,8 +13,16 @@ import type {
   Snippet,
   TableInfo
 } from '@shared/types'
+import { DEFAULT_APPEARANCE } from '@shared/types'
 import { newId } from './lib/sql'
-import { loadSnippets, saveSnippets } from './lib/snippets'
+import { connectionIsGuarded, inspectSqlRisk } from './lib/sqlGuard'
+import {
+  cacheAppearance,
+  collectLocalLayouts,
+  loadLocalAppearance,
+  loadLocalSnippets,
+  loadLocalTimeout
+} from './lib/snippets'
 
 export type TabType =
   | 'query'
@@ -21,6 +32,7 @@ export type TabType =
   | 'schema-overview'
   | 'schema-tables'
   | 'schema-diff'
+  | 'roles'
 export type ThemeName = 'dark' | 'midnight' | 'light'
 export type Density = 'comfortable' | 'compact'
 
@@ -49,6 +61,8 @@ export interface Session {
   queryHistory: QueryHistoryEntry[]
   connectedAt: number
   serverStatus?: ServerStatus
+  inTransaction: boolean
+  catalog?: CatalogSchema
   status: string
   error?: string
 }
@@ -96,12 +110,23 @@ interface AppState {
   queryHistory: QueryHistoryEntry[]
   snippets: Snippet[]
   queryTimeoutMs: number
+  queryHistoryByConnection: Record<string, QueryHistoryEntry[]>
   connectedAt?: number
   serverStatus?: ServerStatus
-  confirm?: { title: string; message: string; danger?: boolean; sql?: string; onConfirm: () => Promise<void> | void }
+  inTransaction: boolean
+  catalog?: CatalogSchema
+  confirm?: {
+    title: string
+    message: string
+    danger?: boolean
+    sql?: string
+    onConfirm: () => Promise<void> | void
+    onCancel?: () => void
+  }
   contextMenu?: ContextMenuState
   loadConnections: () => Promise<void>
   loadAppVersion: () => Promise<void>
+  loadPrefs: () => Promise<void>
   openConnectionDialog: (connection?: ConnectionConfig) => void
   closeDialogs: () => void
   connect: (connection: ConnectionConfig, password?: string) => Promise<void>
@@ -134,46 +159,46 @@ interface AppState {
   setServerStatus: (status?: ServerStatus) => void
   addSnippet: (name: string, sql: string) => void
   deleteSnippet: (id: string) => void
+  beginTransaction: () => Promise<void>
+  commitTransaction: () => Promise<void>
+  rollbackTransaction: () => Promise<void>
+  refreshCatalog: () => Promise<void>
+  dumpDatabase: () => Promise<void>
+  restoreDatabase: () => Promise<void>
 }
 
-const APPEARANCE_KEY = 'data-client:appearance'
-
-type AppearanceState = {
-  sidebarVisible: boolean
-  historyVisible: boolean
-  statusBarVisible: boolean
-  theme: ThemeName
-  density: Density
-}
-
-function loadAppearance(): AppearanceState {
-  try {
-    const raw = localStorage.getItem(APPEARANCE_KEY)
-    if (!raw) {
-      return { sidebarVisible: true, historyVisible: true, statusBarVisible: true, theme: 'dark', density: 'comfortable' }
-    }
-    const parsed = JSON.parse(raw) as Partial<AppearanceState>
-    return {
-      sidebarVisible: parsed.sidebarVisible !== false,
-      historyVisible: parsed.historyVisible !== false,
-      statusBarVisible: parsed.statusBarVisible !== false,
-      theme: parsed.theme === 'light' || parsed.theme === 'midnight' ? parsed.theme : 'dark',
-      density: parsed.density === 'compact' ? 'compact' : 'comfortable'
-    }
-  } catch {
-    return { sidebarVisible: true, historyVisible: true, statusBarVisible: true, theme: 'dark', density: 'comfortable' }
+function normalizeAppearance(parsed?: Partial<AppearancePrefs> | null): AppearancePrefs {
+  return {
+    sidebarVisible: parsed?.sidebarVisible !== false,
+    historyVisible: parsed?.historyVisible !== false,
+    statusBarVisible: parsed?.statusBarVisible !== false,
+    theme: parsed?.theme === 'light' || parsed?.theme === 'midnight' ? parsed.theme : 'dark',
+    density: parsed?.density === 'compact' ? 'compact' : 'comfortable'
   }
 }
 
-function saveAppearance(state: AppearanceState): void {
-  localStorage.setItem(APPEARANCE_KEY, JSON.stringify(state))
+function loadAppearance(): AppearancePrefs {
+  return normalizeAppearance(loadLocalAppearance() ?? DEFAULT_APPEARANCE)
+}
+
+function persistAppearance(state: AppearancePrefs): void {
+  cacheAppearance(state)
+  void window.api.prefs?.patch({ appearance: state })
+}
+
+function persistSnippets(snippets: Snippet[]): void {
+  void window.api.prefs?.patch({ snippets })
+}
+
+function persistHistory(connectionId: string, entries: QueryHistoryEntry[]): void {
+  void window.api.prefs?.patch({ queryHistoryByConnection: { [connectionId]: entries.slice(-200) } })
 }
 
 function isSchemaChanging(sql: string): boolean {
   return /^\s*(create|alter|drop|truncate|comment|grant|revoke|reindex|cluster|refresh)\b/im.test(sql)
 }
 
-function uiState(get: () => AppState): AppearanceState {
+function uiState(get: () => AppState): AppearancePrefs {
   return {
     sidebarVisible: get().sidebarVisible,
     historyVisible: get().historyVisible,
@@ -198,6 +223,8 @@ const emptyMirror = {
   queryHistory: [] as QueryHistoryEntry[],
   connectedAt: undefined as number | undefined,
   serverStatus: undefined as ServerStatus | undefined,
+  inTransaction: false,
+  catalog: undefined as CatalogSchema | undefined,
   status: 'Disconnected',
   error: undefined as string | undefined
 }
@@ -219,6 +246,8 @@ function mirror(session?: Session): typeof emptyMirror {
     queryHistory: session.queryHistory,
     connectedAt: session.connectedAt,
     serverStatus: session.serverStatus,
+    inTransaction: session.inTransaction,
+    catalog: session.catalog,
     status: session.status,
     error: session.error
   }
@@ -251,8 +280,10 @@ export const useAppStore = create<AppState>((set, get) => {
     aboutDialog: false,
     searchOpen: false,
     appVersion: '0.1.0-beta.1',
-    snippets: loadSnippets(),
-    queryTimeoutMs: 0,
+    snippets: loadLocalSnippets(),
+    queryTimeoutMs: loadLocalTimeout(),
+    queryHistoryByConnection: {},
+    inTransaction: false,
     ...loadAppearance(),
 
     loadConnections: async () => {
@@ -267,8 +298,34 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ appVersion: '0.1.0-beta.1' })
       }
     },
+    loadPrefs: async () => {
+      try {
+        const remote = await window.api.prefs.load()
+        let next: AppPrefs = remote
+        if (!remote.migratedFromLocal) {
+          const localAppearance = loadLocalAppearance()
+          next = await window.api.prefs.patch({
+            appearance: normalizeAppearance(localAppearance ?? remote.appearance),
+            snippets: remote.snippets.length ? remote.snippets : loadLocalSnippets(),
+            queryTimeoutMs: remote.queryTimeoutMs || loadLocalTimeout(),
+            schemaLayouts: { ...collectLocalLayouts(), ...remote.schemaLayouts },
+            migratedFromLocal: true
+          })
+        }
+        cacheAppearance(next.appearance)
+        set({
+          ...next.appearance,
+          snippets: next.snippets,
+          queryTimeoutMs: next.queryTimeoutMs,
+          queryHistoryByConnection: next.queryHistoryByConnection ?? {}
+        })
+      } catch {
+        // prefs.json is unavailable; keep the localStorage first-paint values
+      }
+    },
     openConnectionDialog: (connection) => set({ connectionDialog: true, editingConnection: connection }),
-    closeDialogs: () =>
+    closeDialogs: () => {
+      const confirm = get().confirm
       set({
         connectionDialog: false,
         databaseDialog: false,
@@ -278,7 +335,9 @@ export const useAppStore = create<AppState>((set, get) => {
         importDialog: undefined,
         editingConnection: undefined,
         confirm: undefined
-      }),
+      })
+      confirm?.onCancel?.()
+    },
     connect: async (connection, password) => {
       set({ busy: true, error: undefined, status: 'Connecting…' })
       try {
@@ -296,8 +355,9 @@ export const useAppStore = create<AppState>((set, get) => {
           objectsBySchema: {},
           expanded: { databases: true, schemas: true },
           tabs: [{ id: newId(), type: 'query', title: 'Query 1', sql: 'select now();' }],
-          queryHistory: [],
+          queryHistory: get().queryHistoryByConnection[config.id] ?? [],
           connectedAt: Date.now(),
+          inTransaction: false,
           status: `Connected to ${currentDatabase}`
         }
         session.activeTabId = session.tabs[0]?.id
@@ -309,6 +369,7 @@ export const useAppStore = create<AppState>((set, get) => {
           ...mirror(session)
         })
         await get().refreshTree()
+        await get().refreshCatalog()
       } catch (error) {
         set({ error: error instanceof Error ? error.message : String(error), status: 'Connection failed', busy: false })
         throw error
@@ -361,9 +422,12 @@ export const useAppStore = create<AppState>((set, get) => {
           expanded: { databases: true, schemas: true },
           tablesBySchema: {},
           objectsBySchema: {},
+          inTransaction: false,
+          catalog: undefined,
           status: `Connected to ${name}`
         })
         await get().refreshTree()
+        await get().refreshCatalog()
       } catch (error) {
         patchActive({ error: error instanceof Error ? error.message : String(error) })
       } finally {
@@ -412,11 +476,27 @@ export const useAppStore = create<AppState>((set, get) => {
       })
     },
     runSql: async (sql, timeoutMs) => {
-      const id = get().activeConnection?.id
+      const connection = get().activeConnection
+      const id = connection?.id
       if (!id) throw new Error('Not connected')
       const trimmed = sql.trim()
       if (!trimmed || trimmed.startsWith('--')) {
         throw new Error('Nothing to execute')
+      }
+      const risk = inspectSqlRisk(trimmed)
+      if (connectionIsGuarded(connection) && risk.level !== 'none') {
+        await new Promise<void>((resolve, reject) => {
+          set({
+            confirm: {
+              title: connection.environment === 'production' ? 'Production guard' : 'Safe mode',
+              message: risk.reason,
+              danger: risk.level === 'danger',
+              sql: trimmed,
+              onConfirm: () => resolve(),
+              onCancel: () => reject(new Error('Cancelled by production guard'))
+            }
+          })
+        })
       }
       set({ busy: true, error: undefined, status: 'Running…' })
       try {
@@ -425,6 +505,7 @@ export const useAppStore = create<AppState>((set, get) => {
         patchActive({ status: `${last.command} · ${last.rowCount} rows · ${last.durationMs} ms`, error: undefined })
         if (isSchemaChanging(trimmed)) {
           await get().refreshTree()
+          await get().refreshCatalog()
         }
         return results
       } catch (error) {
@@ -448,51 +529,118 @@ export const useAppStore = create<AppState>((set, get) => {
     setAboutDialog: (aboutDialog) => set({ aboutDialog }),
     setSearchOpen: (searchOpen) => set({ searchOpen }),
     setImportDialog: (importDialog) => set({ importDialog }),
-    setQueryTimeoutMs: (queryTimeoutMs) => set({ queryTimeoutMs }),
+    setQueryTimeoutMs: (queryTimeoutMs) => {
+      set({ queryTimeoutMs })
+      localStorage.setItem('data-client:query-timeout', String(queryTimeoutMs))
+      void window.api.prefs?.patch({ queryTimeoutMs })
+    },
     toggleSidebar: () => {
       set({ sidebarVisible: !get().sidebarVisible })
-      saveAppearance(uiState(get))
+      persistAppearance(uiState(get))
     },
     toggleHistory: () => {
       set({ historyVisible: !get().historyVisible })
-      saveAppearance(uiState(get))
+      persistAppearance(uiState(get))
     },
     toggleStatusBar: () => {
       set({ statusBarVisible: !get().statusBarVisible })
-      saveAppearance(uiState(get))
+      persistAppearance(uiState(get))
     },
     setTheme: (theme) => {
       set({ theme })
-      saveAppearance(uiState(get))
+      persistAppearance(uiState(get))
     },
     setDensity: (density) => {
       set({ density })
-      saveAppearance(uiState(get))
+      persistAppearance(uiState(get))
     },
     addHistory: (entry) => {
       const targetId = entry.connectionId ?? get().activeSessionId
       const sessions = get().sessions.map((session) =>
         session.connection.id === targetId
-          ? { ...session, queryHistory: [...session.queryHistory, entry].slice(-300) }
+          ? { ...session, queryHistory: [...session.queryHistory, entry].slice(-200) }
           : session
       )
       const active = sessions.find((session) => session.connection.id === get().activeSessionId)
-      set({ sessions, queryHistory: active?.queryHistory ?? get().queryHistory })
+      const nextHistory =
+        sessions.find((session) => session.connection.id === targetId)?.queryHistory ??
+        [...(get().queryHistoryByConnection[targetId ?? ''] ?? []), entry].slice(-200)
+      if (targetId) persistHistory(targetId, nextHistory)
+      set({
+        sessions,
+        queryHistory: active?.queryHistory ?? get().queryHistory,
+        queryHistoryByConnection: targetId
+          ? { ...get().queryHistoryByConnection, [targetId]: nextHistory }
+          : get().queryHistoryByConnection
+      })
     },
-    clearHistory: () => patchActive({ queryHistory: [] }),
+    clearHistory: () => {
+      const id = get().activeSessionId
+      patchActive({ queryHistory: [] })
+      if (id) {
+        persistHistory(id, [])
+        set({ queryHistoryByConnection: { ...get().queryHistoryByConnection, [id]: [] } })
+      }
+    },
     setServerStatus: (serverStatus) => patchActive({ serverStatus }),
     addSnippet: (name, sql) => {
       const snippets = [
         ...get().snippets.filter((item) => item.name !== name),
         { id: newId(), name, sql, updatedAt: new Date().toISOString() }
       ]
-      saveSnippets(snippets)
+      persistSnippets(snippets)
       set({ snippets })
     },
     deleteSnippet: (id) => {
       const snippets = get().snippets.filter((item) => item.id !== id)
-      saveSnippets(snippets)
+      persistSnippets(snippets)
       set({ snippets })
+    },
+    beginTransaction: async () => {
+      const id = get().activeConnection?.id
+      if (!id) return
+      await window.api.pg.begin(id)
+      patchActive({ inTransaction: true, status: 'Transaction open' })
+    },
+    commitTransaction: async () => {
+      const id = get().activeConnection?.id
+      if (!id) return
+      await window.api.pg.commit(id)
+      patchActive({ inTransaction: false, status: 'Committed' })
+    },
+    rollbackTransaction: async () => {
+      const id = get().activeConnection?.id
+      if (!id) return
+      await window.api.pg.rollback(id)
+      patchActive({ inTransaction: false, status: 'Rolled back' })
+    },
+    refreshCatalog: async () => {
+      const id = get().activeConnection?.id
+      if (!id) return
+      try {
+        const catalog = await window.api.pg.catalogSchema(id)
+        patchActive({ catalog })
+      } catch {
+        // catalog is optional for autocomplete
+      }
+    },
+    dumpDatabase: async () => {
+      const id = get().activeConnection?.id
+      if (!id) return
+      const result = await window.api.pg.dump(id)
+      const cancelled = result.message === 'Cancelled'
+      patchActive({ status: result.message, error: result.ok || cancelled ? undefined : result.message })
+    },
+    restoreDatabase: async () => {
+      const id = get().activeConnection?.id
+      if (!id) return
+      const result = await window.api.pg.restore(id)
+      const cancelled = result.message === 'Cancelled'
+      patchActive({ status: result.message, error: result.ok || cancelled ? undefined : result.message })
+      if (result.ok) {
+        await get().refreshTree()
+        await get().refreshCatalog()
+      }
     }
   }
 })

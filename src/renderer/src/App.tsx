@@ -12,6 +12,7 @@ import { useAppStore } from './store'
 export default function App() {
   const loadConnections = useAppStore((s) => s.loadConnections)
   const loadAppVersion = useAppStore((s) => s.loadAppVersion)
+  const loadPrefs = useAppStore((s) => s.loadPrefs)
   const addHistory = useAppStore((s) => s.addHistory)
   const sidebarVisible = useAppStore((s) => s.sidebarVisible)
   const historyVisible = useAppStore((s) => s.historyVisible)
@@ -22,7 +23,8 @@ export default function App() {
   useEffect(() => {
     void loadConnections()
     void loadAppVersion()
-  }, [loadConnections, loadAppVersion])
+    void loadPrefs()
+  }, [loadConnections, loadAppVersion, loadPrefs])
 
   useEffect(() => {
     return window.api.pg.onHistory((entry) => addHistory(entry))

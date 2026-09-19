@@ -1,5 +1,6 @@
 import { Minus, Square, X } from 'lucide-react'
 import { useAppStore } from '../store'
+import appIcon from '../assets/icon.png'
 
 export function TitleBar() {
   const { currentDatabase, activeConnection, connected, sessions, activeSessionId, switchSession, disconnect } =
@@ -8,7 +9,7 @@ export function TitleBar() {
     <header className="titlebar">
       <div className="titlebar-left">
         <div className="brand">
-          <span className="brand-mark" />
+          <img className="brand-mark" src={appIcon} alt="" />
           Data Client
           <span className="tiny muted" style={{ marginLeft: 8, fontWeight: 500 }}>
             beta
@@ -45,6 +46,7 @@ export function TitleBar() {
         )}
         {connected && (
           <span className="tiny muted">
+            {activeConnection?.environment === 'production' && <span className="prod-badge">PROD</span>}
             {activeConnection?.host}:{activeConnection?.port} / {currentDatabase}
             {activeConnection?.sshEnabled ? ' · SSH' : ''}
           </span>

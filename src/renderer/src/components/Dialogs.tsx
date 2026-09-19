@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ConnectionConfig, SslMode } from '@shared/types'
+import type { ConnectionConfig, ConnectionEnvironment, SslMode } from '@shared/types'
 import { useAppStore } from '../store'
 import { newId, quoteIdent, qualify } from '../lib/sql'
 import { ImportCsvDialog } from './ImportCsvDialog'
@@ -117,6 +117,31 @@ function ConnectionDialog() {
               </select>
             </label>
           </div>
+          <div className="grid-2">
+            <label className="field">
+              Environment
+              <select
+                value={form.environment ?? 'development'}
+                onChange={(e) => {
+                  const environment = e.target.value as ConnectionEnvironment
+                  update('environment', environment)
+                  if (environment === 'production' && form.safeMode !== false) update('safeMode', true)
+                }}
+              >
+                <option value="development">Development</option>
+                <option value="staging">Staging</option>
+                <option value="production">Production</option>
+              </select>
+            </label>
+            <label className="field">
+              Color
+              <input
+                type="color"
+                value={form.color ?? (form.environment === 'production' ? '#ef4444' : '#3b82f6')}
+                onChange={(e) => update('color', e.target.value)}
+              />
+            </label>
+          </div>
           <label className="tiny" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input
               type="checkbox"
@@ -124,6 +149,14 @@ function ConnectionDialog() {
               onChange={(e) => update('savePassword', e.target.checked)}
             />
             Save password in OS-encrypted local store
+          </label>
+          <label className="tiny" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={form.safeMode ?? form.environment === 'production'}
+              onChange={(e) => update('safeMode', e.target.checked)}
+            />
+            Confirm destructive SQL (production guard)
           </label>
           <label className="tiny" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input
@@ -344,7 +377,7 @@ function ConfirmDialog() {
             onClick={async () => {
               try {
                 await confirm.onConfirm()
-                closeDialogs()
+                useAppStore.setState({ confirm: undefined })
               } catch (err) {
                 setError(err instanceof Error ? err.message : String(err))
               }

@@ -11,7 +11,10 @@ import { ViewDesigner } from './ViewDesigner'
 import { SchemaOverview } from './SchemaOverview'
 import { SchemaTableList } from './SchemaTableList'
 import { SchemaDiff } from './SchemaDiff'
+import { RolesPanel } from './RolesPanel'
+import { SessionBar } from './SessionBar'
 import { looksUnlimitedSelectStar } from '../lib/csv'
+import appIcon from '../assets/icon.png'
 
 export function Workspace() {
   const { tabs, activeTabId, openTab, closeTab, connected, connections } = useAppStore()
@@ -21,6 +24,7 @@ export function Workspace() {
 
   return (
     <section className="main">
+      <SessionBar />
       <div className="tabbar">
         {tabs.map((tab) => (
           <button
@@ -59,6 +63,7 @@ export function Workspace() {
       {active?.type === 'schema-diff' && (
         <SchemaDiff leftSchema={active.schema} rightSchema={active.name} />
       )}
+      {active?.type === 'roles' && <RolesPanel />}
       {!active && <div className="empty">Open a query, table, view, or schema to start editing.</div>}
     </section>
   )
@@ -106,10 +111,17 @@ function QueryWorkspace({ tabId, sql, title }: { tabId: string; sql: string; tit
     await execute(sql)
   }
 
+  const catalog = useAppStore((s) => s.catalog)
+  const refreshCatalog = useAppStore((s) => s.refreshCatalog)
+
+  useEffect(() => {
+    if (!catalog) void refreshCatalog()
+  }, [catalog, refreshCatalog])
+
   const explain = async () => {
     if (!sql.trim()) return
     const body = sql.trim().replace(/;+$/, '')
-    await execute(`explain (analyze, buffers, format text) ${body}`)
+    await execute(`explain (analyze, buffers, format json) ${body}`)
   }
 
   useEffect(() => {
@@ -157,7 +169,7 @@ function QueryWorkspace({ tabId, sql, title }: { tabId: string; sql: string; tit
       {error && <div className="error tiny" style={{ padding: '6px 12px' }}>{error}</div>}
       <PanelGroup className="split" direction="vertical">
         <Panel defaultSize={55} minSize={20}>
-          <SqlEditor value={sql} onChange={(value) => setTabSql(tabId, value)} />
+          <SqlEditor value={sql} onChange={(value) => setTabSql(tabId, value)} catalog={catalog} />
         </Panel>
         <PanelResizeHandle style={{ height: 6, background: '#1b2330' }} />
         <Panel defaultSize={45} minSize={15}>
@@ -191,6 +203,7 @@ function Welcome({ connections }: { connections: import('@shared/types').Connect
     <section className="main">
       <div className="welcome">
         <div className="welcome-card">
+          <img className="welcome-icon" src={appIcon} alt="" />
           <h1>Data Client</h1>
           <p className="muted">
             Windows PostgreSQL manager with visual tools for databases, schemas, tables, views, and data.

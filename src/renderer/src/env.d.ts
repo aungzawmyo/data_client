@@ -1,10 +1,21 @@
 /// <reference types="vite/client" />
 
+declare module '*.png' {
+  const src: string
+  export default src
+}
+
 import type {
+  AppPrefs,
+  CatalogSchema,
   ConnectionConfig,
   DatabaseInfo,
+  DumpResult,
   QueryResult,
+  RoleGrant,
+  RoleInfo,
   SchemaInfo,
+  SchemaLayoutState,
   SchemaObjectInfo,
   TableDataPage,
   TableDetails,
@@ -27,6 +38,12 @@ declare global {
         list: () => Promise<ConnectionConfig[]>
         save: (config: ConnectionConfig) => Promise<ConnectionConfig[]>
         delete: (id: string) => Promise<ConnectionConfig[]>
+      }
+      prefs: {
+        load: () => Promise<AppPrefs>
+        patch: (partial: Partial<AppPrefs>) => Promise<AppPrefs>
+        getSchemaLayout: (key: string) => Promise<SchemaLayoutState | null>
+        setSchemaLayout: (key: string, layout: SchemaLayoutState) => Promise<void>
       }
       pg: {
         test: (config: ConnectionConfig) => Promise<string>
@@ -73,6 +90,15 @@ declare global {
           columns: string[],
           rows: unknown[][]
         ) => Promise<number>
+        begin: (id: string) => Promise<void>
+        commit: (id: string) => Promise<void>
+        rollback: (id: string) => Promise<void>
+        txOpen: (id: string) => Promise<boolean>
+        listRoles: (id: string) => Promise<RoleInfo[]>
+        listRoleGrants: (id: string, role: string) => Promise<RoleGrant[]>
+        catalogSchema: (id: string) => Promise<CatalogSchema>
+        dump: (id: string) => Promise<DumpResult>
+        restore: (id: string) => Promise<DumpResult>
         onHistory: (callback: (entry: import('@shared/types').QueryHistoryEntry) => void) => () => void
       }
     }

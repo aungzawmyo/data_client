@@ -1,9 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  AppPrefs,
+  CatalogSchema,
   ConnectionConfig,
   DatabaseInfo,
+  DumpResult,
   QueryResult,
+  RoleGrant,
+  RoleInfo,
   SchemaInfo,
+  SchemaLayoutState,
   SchemaObjectInfo,
   TableDataPage,
   TableDetails,
@@ -25,6 +31,14 @@ const api = {
     save: (config: ConnectionConfig) =>
       ipcRenderer.invoke('connections:save', config) as Promise<ConnectionConfig[]>,
     delete: (id: string) => ipcRenderer.invoke('connections:delete', id) as Promise<ConnectionConfig[]>
+  },
+  prefs: {
+    load: () => ipcRenderer.invoke('prefs:load') as Promise<AppPrefs>,
+    patch: (partial: Partial<AppPrefs>) => ipcRenderer.invoke('prefs:patch', partial) as Promise<AppPrefs>,
+    getSchemaLayout: (key: string) =>
+      ipcRenderer.invoke('prefs:getSchemaLayout', key) as Promise<SchemaLayoutState | null>,
+    setSchemaLayout: (key: string, layout: SchemaLayoutState) =>
+      ipcRenderer.invoke('prefs:setSchemaLayout', key, layout) as Promise<void>
   },
   pg: {
     test: (config: ConnectionConfig) => ipcRenderer.invoke('pg:test', config) as Promise<string>,
@@ -63,6 +77,16 @@ const api = {
       ipcRenderer.invoke('pg:objectDefinition', id, kind, schema, name, extra) as Promise<string>,
     importRows: (id: string, schema: string, table: string, columns: string[], rows: unknown[][]) =>
       ipcRenderer.invoke('pg:importRows', id, schema, table, columns, rows) as Promise<number>,
+    begin: (id: string) => ipcRenderer.invoke('pg:begin', id) as Promise<void>,
+    commit: (id: string) => ipcRenderer.invoke('pg:commit', id) as Promise<void>,
+    rollback: (id: string) => ipcRenderer.invoke('pg:rollback', id) as Promise<void>,
+    txOpen: (id: string) => ipcRenderer.invoke('pg:txOpen', id) as Promise<boolean>,
+    listRoles: (id: string) => ipcRenderer.invoke('pg:listRoles', id) as Promise<RoleInfo[]>,
+    listRoleGrants: (id: string, role: string) =>
+      ipcRenderer.invoke('pg:listRoleGrants', id, role) as Promise<RoleGrant[]>,
+    catalogSchema: (id: string) => ipcRenderer.invoke('pg:catalogSchema', id) as Promise<CatalogSchema>,
+    dump: (id: string) => ipcRenderer.invoke('pg:dump', id) as Promise<DumpResult>,
+    restore: (id: string) => ipcRenderer.invoke('pg:restore', id) as Promise<DumpResult>,
     onHistory: (callback: (entry: import('@shared/types').QueryHistoryEntry) => void) => {
       const listener = (_event: unknown, entry: import('@shared/types').QueryHistoryEntry) => callback(entry)
       ipcRenderer.on('pg:history', listener)

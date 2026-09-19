@@ -3,6 +3,11 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc } from './ipc'
 import { postgres } from './postgres'
+import { flushPrefs } from './prefs'
+
+function appIcon(): string {
+  return join(__dirname, '../../resources/icon.ico')
+}
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -15,6 +20,7 @@ function createWindow(): void {
     backgroundColor: '#10141c',
     autoHideMenuBar: true,
     title: 'Data Client',
+    icon: appIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -54,6 +60,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  flushPrefs()
   void postgres.disconnectAll()
 })
 

@@ -51,13 +51,7 @@ export function toInsertSql(table: string, fields: string[], rows: Record<string
 }
 
 export function downloadText(filename: string, text: string, mime: string): void {
-  const blob = new Blob([text], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.click()
-  URL.revokeObjectURL(url)
+  downloadBlob(filename, new Blob([text], { type: mime }))
 }
 
 export function downloadBlob(filename: string, blob: Blob): void {
@@ -65,6 +59,8 @@ export function downloadBlob(filename: string, blob: Blob): void {
   const link = document.createElement('a')
   link.href = url
   link.download = filename
+  document.body.appendChild(link)
   link.click()
-  URL.revokeObjectURL(url)
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
